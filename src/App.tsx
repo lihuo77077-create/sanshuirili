@@ -193,18 +193,24 @@ export default function App() {
       localStorage.setItem('quickcal_shared_id', id);
       setCalendarId(id);
       
-      // Initialize room
-      await setDoc(doc(db, 'shared_calendars', id), { createdAt: new Date().toISOString() }, { merge: true });
+      // Initialize room and cloud data if migrating
+      try {
+        await setDoc(doc(db, 'shared_calendars', id), { createdAt: new Date().toISOString() }, { merge: true });
 
-      if (shouldMigrate) {
-        // Migrate Events
-        for (const ev of localEvents) {
-          await setDoc(doc(db, 'shared_calendars', id, 'events', ev.id), ev);
+        if (shouldMigrate) {
+          // Migrate Events
+          for (const ev of localEvents) {
+            await setDoc(doc(db, 'shared_calendars', id, 'events', ev.id), ev);
+          }
+          // Migrate Todos
+          for (const todo of localTodos) {
+            await setDoc(doc(db, 'shared_calendars', id, 'todos', todo.id), todo);
+          }
+          // Clear local storage to avoid confusion if needed, but keeping for backup is safer
         }
-        // Migrate Todos
-        for (const todo of localTodos) {
-          await setDoc(doc(db, 'shared_calendars', id, 'todos', todo.id), todo);
-        }
+      } catch (err) {
+        console.error("Initialization error:", err);
+        alert("连接云端失败，请检查网络或刷新重试。");
       }
     } else {
       localStorage.removeItem('quickcal_shared_id');
@@ -703,23 +709,23 @@ export default function App() {
                         <div className="flex items-center gap-5 flex-1">
                           <button 
                             onClick={(e) => { e.stopPropagation(); toggleEventStatus(event.id); }}
-                            className="bg-gray-50 w-11 h-11 rounded-full flex items-center justify-center border border-gray-100 hover:border-blue-200 transition-colors"
+                            className={`bg-gray-50 w-11 h-11 rounded-full flex items-center justify-center border border-gray-100 hover:${theme.border} transition-colors`}
                           >
-                            {event.completed ? <CheckCircle2 className="text-blue-500" size={26} /> : <Circle className="text-gray-200" size={26} />}
+                            {event.completed ? <CheckCircle2 className={theme.text} size={26} /> : <Circle className="text-gray-200" size={26} />}
                           </button>
                           <div className="flex items-center gap-4">
-                            <div className={`w-1 h-10 rounded-full ${event.completed ? 'bg-gray-200' : 'bg-blue-500 shadow-lg shadow-blue-500/20'}`} />
+                            <div className={`w-1 h-10 rounded-full ${event.completed ? 'bg-gray-200' : `${theme.bg} shadow-lg ${calendarId ? 'shadow-rose-500/20' : 'shadow-blue-500/20'}`}`} />
                             {editingEventId === event.id ? (
                               <div className="flex flex-col gap-2">
                                 <input 
                                   autoFocus
-                                  className="bg-transparent text-lg font-bold border-b border-blue-200 outline-none"
+                                  className={`bg-transparent text-lg font-bold border-b ${theme.border} outline-none`}
                                   value={editTitle}
                                   onChange={e => setEditTitle(e.target.value)}
                                   onClick={e => e.stopPropagation()}
                                 />
                                 <input 
-                                  className="bg-transparent text-xs text-blue-500 outline-none"
+                                  className={`bg-transparent text-xs ${theme.text} outline-none`}
                                   value={editTime}
                                   onChange={e => setEditTime(e.target.value)}
                                   onClick={e => e.stopPropagation()}
@@ -740,7 +746,7 @@ export default function App() {
                         <div className="flex gap-2">
                            {editingEventId === event.id ? (
                              <>
-                               <button onClick={(e) => { e.stopPropagation(); saveEvent(); }} className="p-3 bg-blue-50 text-blue-600 rounded-2xl"><Check size={20} /></button>
+                               <button onClick={(e) => { e.stopPropagation(); saveEvent(); }} className={`p-3 ${theme.lightBg} ${theme.text} rounded-2xl`}><Check size={20} /></button>
                                <button onClick={(e) => { e.stopPropagation(); setEditingEventId(null); }} className="p-3 bg-gray-50 text-gray-400 rounded-2xl"><X size={20} /></button>
                              </>
                            ) : (
