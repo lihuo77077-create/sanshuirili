@@ -1,0 +1,65 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helpers
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // Validation Blueprints
+    function isValidSharedCalendar(data) {
+      return data.keys().hasAll(['createdAt']) 
+             && data.keys().size() == 1
+             && data.createdAt is string;
+    }
+
+    function isValidCalendarEvent(data) {
+      return data.keys().hasAll(['title', 'time', 'date', 'type'])
+             && data.title is string && data.title.size() <= 200
+             && data.time is string && data.time.size() <= 20
+             && data.date is string && data.date.matches('^\\d{4}-\\d{2}-\\d{2}$')
+             && data.type in ['calendar', 'custom']
+             && (data.completed == null || data.completed is bool)
+             && (data.createdAt == null || data.createdAt is string);
+    }
+
+    function isValidTodoItem(data) {
+      return data.keys().hasAll(['text', 'completed', 'priority'])
+             && data.text is string && data.text.size() <= 500
+             && data.completed is bool
+             && data.priority in ['high', 'normal', 'low']
+             && (data.createdAt == null || data.createdAt is string);
+    }
+
+    // Match Shared Calendars
+    match /shared_calendars/{calendarId} {
+      allow get: if isValidId(calendarId);
+      allow create, update: if isValidId(calendarId) && isValidSharedCalendar(incoming());
+      
+      // Events subcollection
+      match /events/{eventId} {
+        allow list: if isValidId(calendarId);
+        allow get: if isValidId(calendarId) && isValidId(eventId);
+        allow create: if isValidId(calendarId) && isValidId(eventId) && isValidCalendarEvent(incoming());
+        allow update: if isValidId(calendarId) && isValidId(eventId) && isValidCalendarEvent(incoming());
+        allow delete: if isValidId(calendarId) && isValidId(eventId);
+      }
+
+      // Todos subcollection
+      match /todos/{todoId} {
+        allow list: if isValidId(calendarId);
+        allow get: if isValidId(calendarId) && isValidId(todoId);
+        allow create: if isValidId(calendarId) && isValidId(todoId) && isValidTodoItem(incoming());
+        allow update: if isValidId(calendarId) && isValidId(todoId) && isValidTodoItem(incoming());
+        allow delete: if isValidId(calendarId) && isValidId(todoId);
+      }
+    }
+  }
+}

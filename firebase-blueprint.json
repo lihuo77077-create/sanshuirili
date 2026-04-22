@@ -1,0 +1,53 @@
+{
+  "entities": {
+    "SharedCalendar": {
+      "title": "Shared Calendar",
+      "description": "Metadata for a shared calendar group.",
+      "type": "object",
+      "properties": {
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the calendar was created." }
+      },
+      "required": ["createdAt"]
+    },
+    "CalendarEvent": {
+      "title": "Calendar Event",
+      "description": "An event in the calendar.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "description": "Title of the event." },
+        "time": { "type": "string", "description": "Time of the event (e.g. 15:00)." },
+        "date": { "type": "string", "description": "Date in YYYY-MM-DD format." },
+        "type": { "type": "string", "enum": ["calendar", "custom"] },
+        "completed": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "time", "date", "type"]
+    },
+    "TodoItem": {
+      "title": "Todo Item",
+      "description": "A task in the todo list.",
+      "type": "object",
+      "properties": {
+        "text": { "type": "string" },
+        "completed": { "type": "boolean" },
+        "priority": { "type": "string", "enum": ["high", "normal", "low"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["text", "completed", "priority"]
+    }
+  },
+  "firestore": {
+    "/shared_calendars/{calendarId}": {
+      "schema": "SharedCalendar",
+      "description": "Metadata for a specific shared calendar."
+    },
+    "/shared_calendars/{calendarId}/events/{eventId}": {
+      "schema": "CalendarEvent",
+      "description": "Events within a shared calendar."
+    },
+    "/shared_calendars/{calendarId}/todos/{todoId}": {
+      "schema": "TodoItem",
+      "description": "Todos within a shared calendar."
+    }
+  }
+}
