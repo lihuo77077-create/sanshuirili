@@ -182,16 +182,29 @@ export default function App() {
 
   const toggleSharedMode = async (id: string | null) => {
     if (id) {
-      if (events.length > 0 || todos.length > 0) {
-        if (window.confirm("启用共享模式后，您现有的本地数据将不会同步到云端。建议您先在共享日历中填写。是否继续？")) {
-          localStorage.setItem('quickcal_shared_id', id);
-          setCalendarId(id);
-          await setDoc(doc(db, 'shared_calendars', id), { createdAt: new Date().toISOString() }, { merge: true });
+      const localEvents = JSON.parse(localStorage.getItem('quickcal_events') || '[]');
+      const localTodos = JSON.parse(localStorage.getItem('quickcal_todos') || '[]');
+      
+      let shouldMigrate = false;
+      if (localEvents.length > 0 || localTodos.length > 0) {
+        shouldMigrate = window.confirm("发现本地已有数据，是否同步到共享日历？同步后所有人可见。");
+      }
+
+      localStorage.setItem('quickcal_shared_id', id);
+      setCalendarId(id);
+      
+      // Initialize room
+      await setDoc(doc(db, 'shared_calendars', id), { createdAt: new Date().toISOString() }, { merge: true });
+
+      if (shouldMigrate) {
+        // Migrate Events
+        for (const ev of localEvents) {
+          await setDoc(doc(db, 'shared_calendars', id, 'events', ev.id), ev);
         }
-      } else {
-        localStorage.setItem('quickcal_shared_id', id);
-        setCalendarId(id);
-        await setDoc(doc(db, 'shared_calendars', id), { createdAt: new Date().toISOString() }, { merge: true });
+        // Migrate Todos
+        for (const todo of localTodos) {
+          await setDoc(doc(db, 'shared_calendars', id, 'todos', todo.id), todo);
+        }
       }
     } else {
       localStorage.removeItem('quickcal_shared_id');
@@ -203,15 +216,15 @@ export default function App() {
     }
   };
 
-  const createSharedCalendar = () => {
+  const createSharedCalendar = async () => {
     const newId = Math.random().toString(36).substring(2, 8).toUpperCase();
-    toggleSharedMode(newId);
+    await toggleSharedMode(newId);
     setShowShareModal(false);
   };
 
-  const joinSharedCalendar = () => {
+  const joinSharedCalendar = async () => {
     if (!joinId.trim()) return;
-    toggleSharedMode(joinId.trim().toUpperCase());
+    await toggleSharedMode(joinId.trim().toUpperCase());
     setShowShareModal(false);
     setJoinId('');
   };
@@ -251,6 +264,17 @@ export default function App() {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  const theme = {
+    primary: calendarId ? 'rose' : 'blue',
+    bg: calendarId ? 'bg-rose-500' : 'bg-blue-600',
+    text: calendarId ? 'text-rose-500' : 'text-blue-600',
+    border: calendarId ? 'border-rose-200' : 'border-blue-200',
+    lightBg: calendarId ? 'bg-rose-50' : 'bg-blue-50',
+    headerText: calendarId ? 'text-rose-600' : 'text-blue-600',
+    progress: calendarId ? 'bg-rose-500' : 'bg-blue-500',
+    buttonHover: calendarId ? 'hover:bg-rose-600' : 'hover:bg-blue-700'
+  };
 
   // Persist
   useEffect(() => {
@@ -474,7 +498,7 @@ export default function App() {
       <header className="px-6 pt-10 pb-6 flex flex-col gap-1 sticky top-0 bg-[#F2F2F7]/80 backdrop-blur-xl z-20">
         <div className="flex justify-between items-end max-w-4xl mx-auto w-full">
           <div>
-            <h2 className="text-sm font-bold text-blue-600 uppercase tracking-widest mb-1 opacity-80">
+            <h2 className={`text-sm font-bold ${theme.headerText} uppercase tracking-widest mb-1 opacity-80`}>
               {format(currentTime, 'EEEE', { locale: zhCN })}
             </h2>
             <h1 className="text-4xl font-black tracking-tighter">
@@ -493,7 +517,7 @@ export default function App() {
               whileTap={{ scale: 0.9 }}
               onClick={() => setShowShareModal(true)} 
               className={`w-12 h-12 rounded-2xl shadow-sm border flex items-center justify-center transition-all ${
-                calendarId ? 'bg-blue-100 border-blue-200 text-blue-600' : 'bg-white border-gray-200 text-gray-600'
+                calendarId ? `${theme.lightBg} ${theme.border} ${theme.text}` : 'bg-white border-gray-200 text-gray-600'
               }`}
             >
               <Users size={22} />
@@ -502,7 +526,7 @@ export default function App() {
               whileTap={{ scale: 0.9 }}
               onClick={() => setShowAIInput(!showAIInput)} 
               className={`w-12 h-12 rounded-2xl shadow-sm border flex items-center justify-center transition-all ${
-                showAIInput ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-gray-200 text-blue-600'
+                showAIInput ? `${theme.bg} border-transparent text-white` : `bg-white border-gray-200 ${theme.text}`
               }`}
             >
               {showAIInput ? <X size={24} /> : <Plus size={24} />}
@@ -514,17 +538,17 @@ export default function App() {
       <div className="max-w-4xl mx-auto px-6 space-y-8">
         {/* Dashboard 概览区域 - Bento Grid 风格 */}
         {calendarId && (
-          <div className="bg-blue-600/5 px-4 py-2 rounded-2xl border border-blue-200 flex items-center justify-between">
+          <div className={`${theme.lightBg} px-4 py-2 rounded-2xl border ${theme.border} flex items-center justify-between`}>
             <div className="flex items-center gap-2">
-              <Users className="w-4 h-4 text-blue-600" />
-              <span className="text-sm font-bold text-blue-700">共享模式激活 (ID: {calendarId})</span>
+              <Users className={`w-4 h-4 ${theme.text}`} />
+              <span className={`text-sm font-bold ${calendarId ? 'text-rose-700' : 'text-blue-700'}`}>共享模式激活 (ID: {calendarId})</span>
             </div>
             <button 
               onClick={() => {
                 navigator.clipboard.writeText(calendarId);
                 alert('共享 ID 已复制！');
               }}
-              className="text-xs font-bold text-blue-600 hover:underline"
+              className={`text-xs font-bold ${theme.text} hover:underline`}
             >
               复制 ID
             </button>
@@ -534,7 +558,7 @@ export default function App() {
           {/* 下一个日程卡片 - 最大的展示卡片 */}
           <div className="md:col-span-2 bg-white rounded-[2.5rem] p-6 shadow-sm border border-gray-100 flex flex-col justify-between min-h-[180px]">
              <div className="flex justify-between items-start">
-               <span className="text-[10px] font-black text-blue-500 uppercase tracking-widest bg-blue-50 px-2 py-1 rounded-full">下一个安排</span>
+               <span className={`text-[10px] font-black ${theme.text} uppercase tracking-widest ${theme.lightBg} px-2 py-1 rounded-full`}>下一个安排</span>
                <Clock size={16} className="text-gray-300" />
              </div>
              {stats.nextEvent ? (
@@ -561,7 +585,7 @@ export default function App() {
                    <motion.div 
                     initial={{ width: 0 }}
                     animate={{ width: `${stats.progress}%` }}
-                    className="h-full bg-blue-500" 
+                    className={`h-full ${theme.progress}`} 
                    />
                 </div>
                 <span className="text-[10px] font-bold text-gray-400">{stats.progress}% 进度</span>
@@ -571,7 +595,7 @@ export default function App() {
           {/* 状态统计卡片 - 垂直堆叠 */}
           <div className="grid grid-cols-2 md:grid-cols-1 gap-4">
             <div className="bg-white rounded-[2rem] p-5 shadow-sm border border-gray-100 flex items-center gap-4">
-              <div className="w-12 h-12 rounded-2xl bg-blue-50 flex items-center justify-center text-blue-500">
+              <div className={`w-12 h-12 rounded-2xl ${theme.lightBg} flex items-center justify-center ${theme.text}`}>
                 <CalendarIcon size={24} />
               </div>
               <div>
@@ -878,7 +902,7 @@ export default function App() {
                     />
                     <button 
                       onClick={addQuickTodo} 
-                      className="bg-blue-600 text-white w-16 h-16 rounded-[1.8rem] flex items-center justify-center shadow-lg shadow-blue-500/30 active:scale-95 transition-transform"
+                      className={`${theme.bg} text-white w-16 h-16 rounded-[1.8rem] flex items-center justify-center shadow-lg ${calendarId ? 'shadow-rose-500/30' : 'shadow-blue-500/30'} active:scale-95 transition-transform`}
                     >
                       <Plus size={36} />
                     </button>
@@ -891,9 +915,9 @@ export default function App() {
 
         <footer className="pt-24 pb-12 text-center flex flex-col items-center gap-8">
           <div className="flex items-center gap-3">
-            <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+            <div className={`w-1.5 h-1.5 rounded-full ${theme.progress} animate-pulse`} />
             <p className="text-[11px] text-gray-400 font-black uppercase tracking-[0.45em]">QuickCal Edition v2.5</p>
-            <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+            <div className={`w-1.5 h-1.5 rounded-full ${theme.progress} animate-pulse`} />
           </div>
           <button 
             onClick={clearAllData}
@@ -959,7 +983,7 @@ export default function App() {
                           key={day.toString()}
                           className={`relative py-5 flex flex-col items-center rounded-[1.3rem] transition-all ${
                             isCurrentMonth ? 'opacity-100' : 'opacity-10'
-                          } ${isToday ? 'bg-blue-600 shadow-2xl shadow-blue-300' : 'hover:bg-gray-50'}`}
+                          } ${isToday ? `${theme.bg} shadow-2xl ${calendarId ? 'shadow-rose-300' : 'shadow-blue-300'}` : 'hover:bg-gray-50'}`}
                         >
                           <span className={`text-[17px] font-black leading-none ${
                             isToday ? 'text-white' : 
@@ -968,7 +992,7 @@ export default function App() {
                             {dayNum}
                           </span>
                           {holiday && (
-                            <span className={`mt-1 text-[9px] font-bold ${isToday ? 'text-blue-100' : 'text-gray-400'}`}>
+                            <span className={`mt-1 text-[9px] font-bold ${isToday ? (calendarId ? 'text-rose-100' : 'text-blue-100') : 'text-gray-400'}`}>
                               {holiday.label}
                             </span>
                           )}
@@ -1002,7 +1026,7 @@ export default function App() {
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
               className="bg-white rounded-3xl shadow-2xl p-6 w-full max-w-md relative overflow-hidden"
             >
-              <div className="absolute top-0 left-0 w-full h-2 bg-linear-to-r from-blue-500 to-indigo-600" />
+              <div className={`absolute top-0 left-0 w-full h-2 bg-linear-to-r ${calendarId ? 'from-rose-500 to-pink-600' : 'from-blue-500 to-indigo-600'}`} />
               <button 
                 onClick={() => setShowShareModal(false)}
                 className="absolute top-4 right-4 p-2 hover:bg-gray-100 rounded-full transition-colors"
@@ -1012,7 +1036,7 @@ export default function App() {
 
               <div className="mb-6">
                 <h3 className="text-xl font-bold text-gray-900 flex items-center gap-2">
-                  <Users className="w-6 h-6 text-blue-600" />
+                  <Users className={`w-6 h-6 ${theme.text}`} />
                   共享日历模式
                 </h3>
                 <p className="text-sm text-gray-500 mt-1">
@@ -1022,16 +1046,16 @@ export default function App() {
 
               {calendarId ? (
                 <div className="space-y-4">
-                  <div className="p-4 bg-blue-50 rounded-2xl border border-blue-100">
-                    <p className="text-xs text-blue-600 font-medium mb-1">当前共享 ID</p>
+                  <div className={`p-4 ${theme.lightBg} rounded-2xl border ${theme.border}`}>
+                    <p className={`text-xs ${theme.text} font-medium mb-1`}>当前共享 ID</p>
                     <div className="flex items-center justify-between">
-                      <span className="text-2xl font-mono font-bold tracking-widest text-blue-800">{calendarId}</span>
+                      <span className={`text-2xl font-mono font-bold tracking-widest ${calendarId ? 'text-rose-800' : 'text-blue-800'}`}>{calendarId}</span>
                       <button 
                         onClick={() => {
                           navigator.clipboard.writeText(calendarId);
                           alert('ID 已复制！发给朋友在“加入共享”中输入即可。');
                         }}
-                        className="p-2 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors shadow-sm"
+                        className={`p-2 ${theme.bg} text-white rounded-xl ${theme.buttonHover} transition-colors shadow-sm`}
                       >
                         <Copy className="w-4 h-4" />
                       </button>
@@ -1051,7 +1075,7 @@ export default function App() {
                   <div>
                     <button 
                       onClick={createSharedCalendar}
-                      className="w-full py-4 bg-linear-to-r from-blue-600 to-indigo-600 text-white rounded-2xl font-bold shadow-lg shadow-blue-200 hover:shadow-xl hover:translate-y-[-2px] transition-all flex items-center justify-center gap-2"
+                      className={`w-full py-4 bg-linear-to-r ${calendarId ? 'from-rose-600 to-pink-600' : 'from-blue-600 to-indigo-600'} text-white rounded-2xl font-bold shadow-lg ${calendarId ? 'shadow-rose-200' : 'shadow-blue-200'} hover:shadow-xl hover:translate-y-[-2px] transition-all flex items-center justify-center gap-2`}
                     >
                       <Plus className="w-6 h-6" />
                       创建新的共享日历
