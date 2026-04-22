@@ -154,29 +154,53 @@ export default function App() {
 
   // Firebase Real-time Sync
   useEffect(() => {
-    if (!calendarId) return;
+    let unsubEvents: (() => void) | null = null;
+    let unsubTodos: (() => void) | null = null;
 
-    // Listen for Events
-    const eventsRef = collection(db, 'shared_calendars', calendarId, 'events');
-    const qEvents = query(eventsRef, orderBy('date', 'asc'));
-    const unsubEvents = onSnapshot(qEvents, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })) as CalendarEvent[];
-      setEvents(data);
-    }, (err) => handleFirestoreError(err, 'list', `shared_calendars/${calendarId}/events`));
+    const setupSubscriptions = () => {
+      if (!calendarId) return;
 
-    // Listen for Todos
-    const todosRef = collection(db, 'shared_calendars', calendarId, 'todos');
-    // Using a more robust sorting if createdAt doesn't exist on all yet
-    const qTodos = query(todosRef); 
-    const unsubTodos = onSnapshot(qTodos, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })) as TodoItem[];
-      // Sort manually to be safe
-      setTodos(data.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '')));
-    }, (err) => handleFirestoreError(err, 'list', `shared_calendars/${calendarId}/todos`));
+      // Clean up existing if any (for safety)
+      unsubEvents?.();
+      unsubTodos?.();
+
+      const eventsRef = collection(db, 'shared_calendars', calendarId, 'events');
+      const qEvents = query(eventsRef, orderBy('date', 'asc'));
+      unsubEvents = onSnapshot(qEvents, (snapshot) => {
+        const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })) as CalendarEvent[];
+        setEvents(data);
+      }, (err) => handleFirestoreError(err, 'list', `shared_calendars/${calendarId}/events`));
+
+      const todosRef = collection(db, 'shared_calendars', calendarId, 'todos');
+      const qTodos = query(todosRef); 
+      unsubTodos = onSnapshot(qTodos, (snapshot) => {
+        const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })) as TodoItem[];
+        setTodos(data.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '')));
+      }, (err) => handleFirestoreError(err, 'list', `shared_calendars/${calendarId}/todos`));
+    };
+
+    if (calendarId) {
+      setupSubscriptions();
+      
+      // Multi-device sync enhancement: Re-connect when app becomes visible
+      // This helps mobile devices that might have killed the connection in the background
+      const handleVisibilityChange = () => {
+        if (document.visibilityState === 'visible') {
+          setupSubscriptions();
+        }
+      };
+      
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+      return () => {
+        unsubEvents?.();
+        unsubTodos?.();
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      };
+    }
 
     return () => {
-      unsubEvents();
-      unsubTodos();
+      unsubEvents?.();
+      unsubTodos?.();
     };
   }, [calendarId]);
 
