@@ -39,7 +39,8 @@ import {
   Share2,
   Users,
   Copy,
-  LogOut
+  LogOut,
+  Bell
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI, Type } from "@google/genai";
@@ -71,6 +72,8 @@ interface CalendarEvent {
   createdAt?: string;
   recurrence?: 'daily' | 'weekdays' | 'weekends' | 'none' | 'custom';
   daysOfWeek?: number[]; // 1=Mon, 7=Sun
+  priority?: 'P1' | 'P2' | 'P3';
+  lastCompletedDate?: string; // YYYY-MM-DD
 }
 
 interface TodoItem {
@@ -96,6 +99,11 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [aiRecurrence, setAiRecurrence] = useState<'none' | 'daily' | 'weekdays' | 'weekends' | 'custom'>('none');
   const [aiDaysOfWeek, setAiDaysOfWeek] = useState<number[]>([]);
+  const [aiPriority, setAiPriority] = useState<'P1' | 'P2' | 'P3'>('P3');
+
+  // Reminder System States
+  const [activeReminder, setActiveReminder] = useState<{ eventId: string; type: 'notice'; minutes: number } | null>(null);
+  const [acknowledgedReminders, setAcknowledgedReminders] = useState<Record<string, number[]>>({});
 
   // ... (previous static data like holidays remains used via useMemo)
 
@@ -156,6 +164,70 @@ export default function App() {
     }
     return [];
   });
+
+  // Pre-calculated filtered data to avoid complex JSX nesting
+  const { todayEvents, upcomingEvents } = useMemo(() => {
+    const todayStr = format(currentTime, 'yyyy-MM-dd');
+    const dayOfWeek = currentTime.getDay();
+
+    const todayList = events.filter(e => {
+      const isCompletedToday = e.lastCompletedDate === todayStr;
+      if (isCompletedToday) return true;
+      if (e.date === todayStr) return true;
+      const isPastNonRecurring = !e.completed && e.date < todayStr && (!e.recurrence || e.recurrence === 'none');
+      if (isPastNonRecurring) return true;
+      
+      if (e.recurrence === 'daily') return true;
+      if (e.recurrence === 'weekdays' && dayOfWeek >= 1 && dayOfWeek <= 5) return true;
+      if (e.recurrence === 'weekends' && (dayOfWeek === 0 || dayOfWeek === 6)) return true;
+      const mappedDay = dayOfWeek === 0 ? 7 : dayOfWeek;
+      if (e.recurrence === 'custom' && e.daysOfWeek && e.daysOfWeek.includes(mappedDay)) return true;
+      return false;
+    }).sort((a, b) => {
+      // 1. Completion status (Done goes to bottom)
+      const isACompleted = a.recurrence && a.recurrence !== 'none' 
+        ? a.lastCompletedDate === todayStr 
+        : a.completed;
+      const isBCompleted = b.recurrence && b.recurrence !== 'none' 
+        ? b.lastCompletedDate === todayStr 
+        : b.completed;
+      
+      if (isACompleted !== isBCompleted) {
+        return isACompleted ? 1 : -1;
+      }
+
+      // 2. Priority
+      const pMap = { P1: 0, P2: 1, P3: 2 };
+      const pA = pMap[a.priority || 'P3'];
+      const pB = pMap[b.priority || 'P3'];
+      if (pA !== pB) return pA - pB;
+      
+      // 3. Date & Time
+      if (a.date !== b.date) return a.date.localeCompare(b.date);
+      return a.time.localeCompare(b.time);
+    });
+
+    const upcomingList = events.filter(e => {
+      // For upcoming:
+      // 1. Non-recurring: Date must be future
+      // 2. Recurring: Should always show a "Next" preview unless it occurred today?
+      // Actually, keep it simple for now as per previous logic
+      if (e.date > todayStr) return true;
+      return false;
+    }).sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time));
+
+    return { todayEvents: todayList, upcomingEvents: upcomingList };
+  }, [events, currentTime]);
+
+  // Priority-grouped events for the overview dashboard
+  const groupedTodayEvents = useMemo(() => {
+    const groups = { 
+      P1: todayEvents.filter(e => e.priority === 'P1'),
+      P2: todayEvents.filter(e => e.priority === 'P2'),
+      P3: todayEvents.filter(e => e.priority === 'P3' || !e.priority)
+    };
+    return groups;
+  }, [todayEvents]);
 
   // Firebase Real-time Sync
   useEffect(() => {
@@ -308,11 +380,73 @@ export default function App() {
     }
   };
 
-  // Tick-tock
+  // Auto-Update Current Time & Timer for Reminders
   useEffect(() => {
-    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    const timer = setInterval(() => {
+      const now = new Date();
+      setCurrentTime(now);
+      
+      const todayStr = format(now, 'yyyy-MM-dd');
+      const dayOfWeek = now.getDay();
+      const nowHours = now.getHours();
+      const nowMinutes = now.getMinutes();
+
+      // Filter events relevant for reminder check - ONLY for P1 (High Priority/Emergency)
+      const reminderEvents = events.filter(e => {
+        // Only remind for P1 (High Priority) as per user request
+        if (e.priority !== 'P1') return false;
+
+        const isCompletedToday = e.lastCompletedDate === todayStr;
+        if (e.completed && !isCompletedToday && (!e.recurrence || e.recurrence === 'none')) return false;
+        if (isCompletedToday) return false; // Don't remind if already done today
+        
+        if (e.date === todayStr) return true;
+        
+        // Handle recurrence
+        if (e.recurrence === 'daily') return true;
+        if (e.recurrence === 'weekdays' && dayOfWeek >= 1 && dayOfWeek <= 5) return true;
+        if (e.recurrence === 'weekends' && (dayOfWeek === 0 || dayOfWeek === 6)) return true;
+        const mappedDay = dayOfWeek === 0 ? 7 : dayOfWeek;
+        if (e.recurrence === 'custom' && e.daysOfWeek && e.daysOfWeek.includes(mappedDay)) return true;
+        
+        return false;
+      });
+
+      for (const event of reminderEvents) {
+        const [eH, eM] = event.time.split(':').map(Number);
+        const eventTotalMin = eH * 60 + eM;
+        const nowTotalMin = nowHours * 60 + nowMinutes;
+        const diff = eventTotalMin - nowTotalMin;
+
+        // Condition for 10 or 5 minute mandatory popups
+        if ((diff === 10 || diff === 5) && !acknowledgedReminders[event.id]?.includes(diff)) {
+          if (!activeReminder || activeReminder.eventId !== event.id || activeReminder.minutes !== diff) {
+            setActiveReminder({ eventId: event.id, type: 'notice', minutes: diff });
+            const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+            audio.play().catch(() => {});
+          }
+        }
+        
+        // Exact time reminder (0 minutes left) - no mandatory button, auto-closes
+        if (diff === 0 && !acknowledgedReminders[event.id]?.includes(0)) {
+           if (!activeReminder || activeReminder.eventId !== event.id || activeReminder.minutes !== 0) {
+              setActiveReminder({ eventId: event.id, type: 'notice', minutes: 0 });
+              const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2568/2568-preview.mp3');
+              audio.play().catch(() => {});
+              
+              // Mark as seen for 0min so it doesn't re-trigger and auto-closes soon
+              setAcknowledgedReminders(prev => ({
+                ...prev,
+                [event.id]: [...(prev[event.id] || []), 0]
+              }));
+              
+              setTimeout(() => setActiveReminder(null), 30000); 
+           }
+        }
+      }
+    }, 10000); // Check every 10 seconds for high responsiveness
     return () => clearInterval(timer);
-  }, []);
+  }, [events, acknowledgedReminders, activeReminder]);
 
   const theme = {
     primary: calendarId ? 'rose' : 'blue',
@@ -418,14 +552,27 @@ export default function App() {
   const toggleEventStatus = async (id: string) => {
     const event = events.find(e => e.id === id);
     if (!event) return;
-    const newStatus = !event.completed;
+
+    const todayStr = format(currentTime, 'yyyy-MM-dd');
+    const isRecurring = event.recurrence && event.recurrence !== 'none';
+    
+    let updatePayload: any;
+    if (isRecurring) {
+      const completedToday = event.lastCompletedDate === todayStr;
+      updatePayload = { 
+        lastCompletedDate: completedToday ? '' : todayStr,
+        completed: !completedToday 
+      };
+    } else {
+      updatePayload = { completed: !event.completed };
+    }
 
     if (calendarId) {
       try {
-        await updateDoc(doc(db, 'shared_calendars', calendarId, 'events', id), { completed: newStatus });
+        await updateDoc(doc(db, 'shared_calendars', calendarId, 'events', id), updatePayload);
       } catch (err) { handleFirestoreError(err, 'update', `shared_calendars/${calendarId}/events/${id}`); }
     } else {
-      setEvents(prev => prev.map(e => e.id === id ? { ...e, completed: newStatus } : e));
+      setEvents(prev => prev.map(e => e.id === id ? { ...e, ...updatePayload } : e));
     }
   };
 
@@ -449,7 +596,8 @@ export default function App() {
       completed: false,
       createdAt: new Date().toISOString(),
       recurrence: finalRecurrence,
-      daysOfWeek: finalDaysOfWeek
+      daysOfWeek: finalDaysOfWeek,
+      priority: aiPriority !== 'P3' ? aiPriority : (result.priority || 'P3')
     };
 
     if (calendarId) {
@@ -474,16 +622,20 @@ export default function App() {
     setIsParsing(true);
     try {
       const todayDate = format(currentTime, 'yyyy-MM-dd');
-      const prompt = `今天日期是 ${todayDate} (${format(currentTime, 'EEEE', { locale: zhCN })}). 
+      const nowTime = format(currentTime, 'HH:mm');
+      const prompt = `今天日期是 ${todayDate}，当前时间是 ${nowTime} (${format(currentTime, 'EEEE', { locale: zhCN })}). 
       请解析用户输入，识别出提到每一个独立的日程安排，并返回一个 JSON 数组。
       用户输入: "${inputText}"
       
       格式要求：
       返回 JSON 数组，每一项包含: 
       - title: 核心描述。
-      - time: 24小时制时间（如 "14:00"），如未提及则设为 "09:00"。
+      - time: 24小时制时间（如 "14:00"）。
+        *重要*: 如果用户说"15分钟后"、"一小时后"等相对时间，请基于当前时间 ${nowTime} 准确计算。
+        *重要*: 如果未提及时间，请设为 "09:00"。
       - date: 准确计算相对于 ${todayDate} 的日期。
-      - recurrence: 如果用户提到"每天"、"每周五"、"工作日"、"周一到周五"等，请设为 "daily"、"weekdays" 或 "weekends"。否则设为 "none"。`;
+      - recurrence: 如果用户提到"每天"、"每周五"、"工作日"、"周一到周五"等，请设为 "daily"、"weekdays" 或 "weekends"。否则设为 "none"。
+      - priority: 如果提及"火速"、"紧急"、"立刻"设为 "P1"；如果提及"重要"、"关键"设为 "P2"；其他设为 "P3"。`;
 
       let parsedResults = [];
 
@@ -545,6 +697,7 @@ export default function App() {
         setInputText('');
         setAiRecurrence('none');
         setAiDaysOfWeek([]);
+        setAiPriority('P3');
         setShowAIInput(false);
       } else {
         throw new Error("No events found");
@@ -625,6 +778,88 @@ export default function App() {
             </button>
           </div>
         )}
+
+        {/* 今日全景仪表盘 - 现在移到了最前面 */}
+        <motion.div 
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-white p-7 rounded-[2.5rem] shadow-sm border border-gray-100 overflow-hidden relative"
+        >
+          <div className="flex items-center justify-between mb-6">
+            <h3 className="text-sm font-black text-gray-800 uppercase tracking-widest flex items-center gap-2">
+              <Sparkles size={16} className="text-amber-500" />
+              今日全景看板
+            </h3>
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-1">
+                <div className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                <span className="text-[10px] font-bold text-gray-400">P1</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                <span className="text-[10px] font-bold text-gray-400">P2</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                <span className="text-[10px] font-bold text-gray-400">P3</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+            <div className="bg-red-50/30 p-4 rounded-[1.8rem] space-y-4 border border-red-50/50">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-black text-red-500 uppercase tracking-widest">紧急事项</span>
+                <span className="ml-auto bg-red-500 text-white text-[9px] px-1.5 py-0.5 rounded-md font-black">{groupedTodayEvents.P1.length}</span>
+              </div>
+              <div className="space-y-2">
+                {groupedTodayEvents.P1.length > 0 ? groupedTodayEvents.P1.map((e, i) => (
+                  <div key={e.id} className="flex gap-2">
+                    <span className="text-[10px] font-black text-red-200 mt-0.5">{i + 1}.</span>
+                    <p className={`text-[13px] font-bold leading-tight ${e.completed || (e.recurrence && e.lastCompletedDate === format(currentTime, 'yyyy-MM-dd')) ? 'text-red-200 line-through' : 'text-red-700'}`}>
+                      {e.title}
+                    </p>
+                  </div>
+                )) : <p className="text-[10px] text-red-300 italic font-medium">✨ 暂无紧急警报</p>}
+              </div>
+            </div>
+
+            <div className="bg-amber-50/30 p-4 rounded-[1.8rem] space-y-4 border border-amber-50/50">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-black text-amber-500 uppercase tracking-widest">重要工作</span>
+                <span className="ml-auto bg-amber-500 text-white text-[9px] px-1.5 py-0.5 rounded-md font-black">{groupedTodayEvents.P2.length}</span>
+              </div>
+              <div className="space-y-2">
+                {groupedTodayEvents.P2.length > 0 ? groupedTodayEvents.P2.map((e, i) => (
+                  <div key={e.id} className="flex gap-2">
+                    <span className="text-[10px] font-black text-amber-200 mt-0.5">{i + 1}.</span>
+                    <p className={`text-[13px] font-bold leading-tight ${e.completed || (e.recurrence && e.lastCompletedDate === format(currentTime, 'yyyy-MM-dd')) ? 'text-amber-200 line-through' : 'text-amber-700'}`}>
+                      {e.title}
+                    </p>
+                  </div>
+                )) : <p className="text-[10px] text-amber-300 italic font-medium">⚖️ 今日按部就班</p>}
+              </div>
+            </div>
+
+            <div className="bg-emerald-50/30 p-4 rounded-[1.8rem] space-y-4 border border-emerald-50/50">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-black text-emerald-500 uppercase tracking-widest">生活琐事</span>
+                <span className="ml-auto bg-emerald-500 text-white text-[9px] px-1.5 py-0.5 rounded-md font-black">{groupedTodayEvents.P3.length}</span>
+              </div>
+              <div className="space-y-2">
+                {groupedTodayEvents.P3.length > 0 ? groupedTodayEvents.P3.map((e, i) => (
+                  <div key={e.id} className="flex gap-2">
+                    <span className="text-[10px] font-black text-emerald-200 mt-0.5">{i + 1}.</span>
+                    <p className={`text-[13px] font-bold leading-tight ${e.completed || (e.recurrence && e.lastCompletedDate === format(currentTime, 'yyyy-MM-dd')) ? 'text-emerald-200 line-through' : 'text-emerald-700'}`}>
+                      {e.title}
+                    </p>
+                  </div>
+                )) : <p className="text-[10px] text-emerald-300 italic font-medium">🍃 享受惬意时光</p>}
+              </div>
+            </div>
+          </div>
+        </motion.div>
+
         <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
           {/* 下一个日程卡片 - 最大的展示卡片 */}
           <div className="md:col-span-2 bg-white rounded-[2.5rem] p-6 shadow-sm border border-gray-100 flex flex-col justify-between min-h-[180px]">
@@ -687,6 +922,49 @@ export default function App() {
         </section>
 
         {/* 智能输入框 - 抽屉式设计 */}
+        {/* 强提醒遮罩层 */}
+        <AnimatePresence>
+          {activeReminder && (
+            <motion.div 
+              initial={{ opacity: 0, y: -50 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -50 }}
+              className="fixed inset-x-0 top-10 flex justify-center z-[100] pointer-events-none"
+            >
+              <div className="bg-white/80 backdrop-blur-2xl p-6 rounded-[3rem] shadow-[0_30px_60px_-12px_rgba(0,0,0,0.15)] border border-white/50 w-[90%] max-w-sm pointer-events-auto flex flex-col items-center gap-4">
+                <div className={`w-16 h-16 rounded-full flex items-center justify-center ${activeReminder.minutes === 0 ? 'bg-red-500 animate-bounce' : 'bg-amber-500'}`}>
+                  <Bell className="text-white" size={32} />
+                </div>
+                <div className="text-center">
+                  <h3 className="text-2xl font-black tracking-tighter">
+                    {activeReminder.minutes === 0 ? '准点提醒！' : `还有 ${activeReminder.minutes} 分钟`}
+                  </h3>
+                  <p className="text-gray-500 font-medium mt-1">
+                    {events.find(e => e.id === activeReminder.eventId)?.title || '即将进行的任务'}
+                  </p>
+                </div>
+                {activeReminder.minutes > 0 ? (
+                  <motion.button 
+                    whileTap={{ scale: 0.9 }}
+                    onClick={() => {
+                      setAcknowledgedReminders(prev => ({
+                        ...prev,
+                        [activeReminder.eventId]: [...(prev[activeReminder.eventId] || []), activeReminder.minutes]
+                      }));
+                      setActiveReminder(null);
+                    }}
+                    className={`${theme.bg} text-white w-full py-4 rounded-[2rem] font-bold shadow-lg shadow-blue-500/20`}
+                  >
+                    我知道了
+                  </motion.button>
+                ) : (
+                  <p className="text-[10px] text-gray-300 font-bold uppercase tracking-widest animate-pulse">提醒窗口将在30秒后自动关闭</p>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         <AnimatePresence>
           {showAIInput && (
             <motion.div 
@@ -767,6 +1045,31 @@ export default function App() {
                     </button>
                   ))}
                 </div>
+
+                {/* 优先级选择器 */}
+                <div className="flex items-center gap-3 pt-2">
+                  <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">优先级</span>
+                  <div className="flex gap-4">
+                    {[
+                      { id: 'P1', color: 'bg-red-500', label: '紧急' },
+                      { id: 'P2', color: 'bg-amber-500', label: '重要' },
+                      { id: 'P3', color: 'bg-emerald-500', label: '普通' }
+                    ].map(p => (
+                      <button
+                        key={p.id}
+                        onClick={() => setAiPriority(p.id as any)}
+                        className={`flex items-center gap-2 px-3 py-1.5 rounded-full transition-all ${
+                          aiPriority === p.id 
+                            ? `${p.color} text-white shadow-lg` 
+                            : 'bg-gray-50 text-gray-400 hover:bg-gray-100'
+                        }`}
+                      >
+                        <div className={`w-2 h-2 rounded-full ${aiPriority === p.id ? 'bg-white' : p.color}`} />
+                        <span className="text-[10px] font-bold">{p.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
 
               <div className="flex justify-between items-center mt-6 pt-4 border-t border-gray-50">
@@ -816,37 +1119,21 @@ export default function App() {
                 className="space-y-4"
               >
                 <div className="grid gap-3">
-                  {(() => {
-                    const todayStr = format(currentTime, 'yyyy-MM-dd');
-                    const dayOfWeek = currentTime.getDay();
-                    const displayEvents = events
-                      .filter(e => {
-                        if (e.date === todayStr) return true;
-                        if (!e.completed && e.date < todayStr && (!e.recurrence || e.recurrence === 'none')) return true;
-                        if (e.recurrence === 'daily') return true;
-                        if (e.recurrence === 'weekdays' && dayOfWeek >= 1 && dayOfWeek <= 5) return true;
-                        if (e.recurrence === 'weekends' && (dayOfWeek === 0 || dayOfWeek === 6)) return true;
-                        if (e.recurrence === 'custom' && e.daysOfWeek && e.daysOfWeek.includes(dayOfWeek === 0 ? 7 : dayOfWeek)) return true;
-                        return false;
-                      })
-                      .sort((a, b) => {
-                        if (a.date !== b.date) return a.date.localeCompare(b.date);
-                        return a.time.localeCompare(b.time);
-                      });
-
-                    if (displayEvents.length === 0) {
-                      return (
-                        <div className="flex flex-col items-center justify-center p-20 bg-white/40 rounded-[3rem] border border-dashed border-gray-300">
-                          <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center mb-4 shadow-sm">
-                            <CalendarIcon size={32} className="text-gray-300" />
-                          </div>
-                          <p className="text-gray-400 font-medium">今天没有任何安排</p>
-                          <button onClick={() => setShowAIInput(true)} className={`mt-4 ${theme.text} text-sm font-bold`}>立刻规划日程</button>
+                  {todayEvents.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center p-20 bg-white/40 rounded-[3rem] border border-dashed border-gray-300">
+                        <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center mb-4 shadow-sm">
+                          <CalendarIcon size={32} className="text-gray-300" />
                         </div>
-                      );
-                    }
+                        <p className="text-gray-400 font-medium">今天没有任何安排</p>
+                        <button onClick={() => setShowAIInput(true)} className={`mt-4 ${theme.text} text-sm font-bold`}>立刻规划日程</button>
+                      </div>
+                    ) : todayEvents.map(event => {
+                      const todayStr = format(currentTime, 'yyyy-MM-dd');
+                      const isReallyCompleted = event.recurrence && event.recurrence !== 'none' 
+                        ? event.lastCompletedDate === todayStr 
+                        : event.completed;
 
-                    return displayEvents.map(event => (
+                      return (
                       <motion.div 
                         layout
                         key={event.id}
@@ -858,10 +1145,15 @@ export default function App() {
                             onClick={(e) => { e.stopPropagation(); toggleEventStatus(event.id); }}
                             className={`bg-gray-50 w-11 h-11 rounded-full flex items-center justify-center border border-gray-100 hover:${theme.border} transition-colors`}
                           >
-                            {event.completed ? <CheckCircle2 className={theme.text} size={26} /> : <Circle className="text-gray-200" size={26} />}
+                            {isReallyCompleted ? <CheckCircle2 className={theme.text} size={26} /> : <Circle className="text-gray-200" size={26} />}
                           </button>
                           <div className="flex items-center gap-4">
-                            <div className={`w-1 h-10 rounded-full ${event.completed ? 'bg-gray-200' : `${theme.bg} shadow-lg ${calendarId ? 'shadow-rose-500/20' : 'shadow-blue-500/20'}`}`} />
+                            <div className={`w-1 h-10 rounded-full ${
+                            isReallyCompleted ? 'bg-gray-200' : 
+                            event.priority === 'P1' ? 'bg-red-500 shadow-[0_0_12px_rgba(239,68,68,0.5)] animate-pulse' :
+                            event.priority === 'P2' ? 'bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.3)]' :
+                            'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.3)]'
+                          }`} />
                             {editingEventId === event.id ? (
                               <div className="flex flex-col gap-2">
                                 <input 
@@ -888,11 +1180,25 @@ export default function App() {
                                     <span className="px-2 py-0.5 bg-red-50 text-red-500 text-[9px] font-black rounded-full uppercase tracking-tighter">延期</span>
                                   )}
                                 </div>
-                                <p className="text-xs text-gray-400 font-medium flex items-center gap-1 mt-0.5 uppercase tracking-wider">
-                                  <Clock size={12} /> {event.date < todayStr && !event.recurrence ? `原定于 ${format(new Date(event.date), 'M/d')} ` : ''}{event.time}
+                                <p className="text-xs font-medium flex items-center gap-1 mt-0.5 uppercase tracking-wider">
+                                  <Clock size={12} /> 
+                                    <span className={(() => {
+                                      const [eH, eM] = event.time.split(':').map(Number);
+                                      const eventMinutes = eH * 60 + eM;
+                                      const nowInMinutes = currentTime.getHours() * 60 + currentTime.getMinutes();
+                                      const isCompletedTodayLocal = event.recurrence && event.recurrence !== 'none' 
+                                        ? event.lastCompletedDate === todayStr 
+                                        : event.completed;
+                                        
+                                      return (eventMinutes < nowInMinutes && !isCompletedTodayLocal && (!event.recurrence || event.recurrence === 'none' || event.date === format(currentTime, 'yyyy-MM-dd'))) 
+                                        ? 'text-red-500 font-black animate-pulse' 
+                                        : 'text-gray-400';
+                                    })()}>
+                                    {event.date < todayStr && !event.recurrence ? `原定于 ${format(new Date(event.date), 'M/d')} ` : ''}{event.time}
+                                  </span>
                                   {event.recurrence && event.recurrence !== 'none' && (
-                                    <span className={`ml-2 px-1.5 py-0.5 ${theme.lightBg} ${theme.text} text-[8px] font-bold rounded-md flex items-center gap-0.5`}>
-                                      <RefreshCcw size={8} />
+                                    <span className={`ml-3 px-2 py-0.5 ${theme.lightBg} ${theme.text} text-[10px] font-bold rounded-full flex items-center gap-1 border ${theme.border} shadow-xs`}>
+                                      <RefreshCcw size={10} className="opacity-70" />
                                       {event.recurrence === 'daily' ? '每日' : 
                                        event.recurrence === 'weekdays' ? '工作日' : 
                                        event.recurrence === 'weekends' ? '周末' : 
@@ -920,8 +1226,8 @@ export default function App() {
                            )}
                         </div>
                       </motion.div>
-                    ));
-                  })()}
+                    );
+                  })}
                 </div>
               </motion.div>
             )}
@@ -935,12 +1241,13 @@ export default function App() {
                 className="space-y-8"
               >
                 {(() => {
-                  const todayStr = format(currentTime, 'yyyy-MM-dd');
-                  const futureEvents = events
-                    .filter(e => e.date > todayStr)
-                    .sort((a, b) => a.date.localeCompare(b.date));
+                  const groups: Record<string, CalendarEvent[]> = {};
+                  upcomingEvents.forEach(e => {
+                    if (!groups[e.date]) groups[e.date] = [];
+                    groups[e.date].push(e);
+                  });
 
-                  if (futureEvents.length === 0) {
+                  if (upcomingEvents.length === 0) {
                     return (
                       <div className="flex flex-col items-center justify-center p-20 bg-white/40 rounded-[3rem] border border-dashed border-gray-300">
                         <p className="text-gray-400 font-medium">暂时没有后续日程</p>
@@ -948,13 +1255,7 @@ export default function App() {
                     );
                   }
 
-                  const groups: Record<string, CalendarEvent[]> = {};
-                  futureEvents.forEach(e => {
-                    if (!groups[e.date]) groups[e.date] = [];
-                    groups[e.date].push(e);
-                  });
-
-                  return Object.keys(groups).map(date => (
+                  return Object.keys(groups).sort().map(date => (
                     <div key={date} className="space-y-4">
                       <div className="flex items-center gap-4 px-4 text-gray-300">
                         <div className="h-px bg-current flex-1 opacity-20" />
